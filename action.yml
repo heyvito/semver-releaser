@@ -1,0 +1,14 @@
+name: 'semver-releaser'
+description: 'Creates SemVer releases based on Conventional Commits'
+branding:
+  icon: box
+  color: yellow
+inputs:
+  github-token:
+    description: 'GitHub Token'
+    required: true
+runs:
+  using: 'docker'
+  image: docker://ghcr.io/heyvito/semver-releaser:latest
+  args:
+    - ${{ inputs.github-token }}
