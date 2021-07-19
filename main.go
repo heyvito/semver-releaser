@@ -167,6 +167,11 @@ func main() {
 	nextVersion := fmt.Sprintf("v%d.%d.%d", major, minor, patch)
 	breaks, feats, fixes := conventionals.Stats()
 	info("Releasing %s with %d break(s), %d feature(s), %d fix(es)", nextVersion, breaks, feats, fixes)
+	
+	if breaks == 0 && feats == 0 && fixes == 0 {
+		info("No need to bump version.")
+		return
+	} 
 
 	currentHead, err := repo.Head()
 	if err != nil {
