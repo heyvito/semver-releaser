@@ -27,7 +27,7 @@ jobs:
         run: git fetch --prune --unshallow --tags -f
 
      - name: semver-releaser
-       uses: heyvito/semver-releaser@v0.0.8
+       uses: heyvito/semver-releaser@v0.0.9
        with:
         github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
