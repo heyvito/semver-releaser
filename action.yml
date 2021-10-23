@@ -7,6 +7,9 @@ inputs:
   github-token:
     description: 'GitHub Token'
     required: true
+outputs:
+  version:
+    description: 'Version tagged and pushed'
 runs:
   using: 'docker'
   image: docker://ghcr.io/heyvito/semver-releaser:latest

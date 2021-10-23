@@ -15,7 +15,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/google/go-github/v35/github"
+	"github.com/google/go-github/v39/github"
 	"golang.org/x/mod/semver"
 	"golang.org/x/oauth2"
 )
@@ -167,11 +167,11 @@ func main() {
 	nextVersion := fmt.Sprintf("v%d.%d.%d", major, minor, patch)
 	breaks, feats, fixes := conventionals.Stats()
 	info("Releasing %s with %d break(s), %d feature(s), %d fix(es)", nextVersion, breaks, feats, fixes)
-	
+
 	if breaks == 0 && feats == 0 && fixes == 0 {
 		info("No need to bump version.")
 		return
-	} 
+	}
 
 	currentHead, err := repo.Head()
 	if err != nil {
@@ -229,6 +229,8 @@ func main() {
 	if err != nil {
 		abort("Error creating release: %s", err)
 	}
+
+	fmt.Printf("::set-output name=version::%s\n", nextVersion)
 }
 
 func formatCommit(c *ConventionalCommit) string {
