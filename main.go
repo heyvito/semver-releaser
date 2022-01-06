@@ -60,6 +60,10 @@ func main() {
 	repoComponents := strings.Split(repoFullName, "/")
 	repoOwner, repoName := repoComponents[0], repoComponents[1]
 	token := os.Args[1]
+	noPush := false
+	if len(os.Args) > 2 {
+		noPush = os.Args[2] == "true"
+	}
 
 	info("Working on %s", repoPath)
 	repo, err := git.PlainOpen(repoPath)
@@ -173,6 +177,12 @@ func main() {
 		return
 	}
 
+	fmt.Printf("::set-output name=version::%s\n", nextVersion)
+
+	if noPush {
+		return
+	}
+
 	currentHead, err := repo.Head()
 	if err != nil {
 		abort("Error reading head: %s", err)
@@ -230,7 +240,6 @@ func main() {
 		abort("Error creating release: %s", err)
 	}
 
-	fmt.Printf("::set-output name=version::%s\n", nextVersion)
 }
 
 func formatCommit(c *ConventionalCommit) string {

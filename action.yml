@@ -7,6 +7,10 @@ inputs:
   github-token:
     description: 'GitHub Token'
     required: true
+  no-push:
+    description: 'Do not push tag, only generate version'
+    required: false
+    default: 'false'
 outputs:
   version:
     description: 'Version tagged and pushed'
