@@ -7,10 +7,22 @@ inputs:
   github-token:
     description: 'GitHub Token'
     required: true
-  no-push:
-    description: 'Do not push tag, only generate version'
+  push:
+    description: 'Whether to push a new tag for the calculated version'
     required: false
-    default: 'false'
+    default: 'true'
+  rules:
+    description: 'How to handle prefixes'
+    required: false
+    default: 'fix=patch feat=minor bang=major'
+  categories:
+    description: 'How to generate categories based on prefixes'
+    required: false
+    default: 'fix=Fix feat=Feature'
+  ignore:
+    description: "A space-delimited list of prefixes to ignore"
+    required: false
+    default: ""
 outputs:
   version:
     description: 'Version tagged and pushed'
@@ -18,4 +30,8 @@ runs:
   using: 'docker'
   image: docker://ghcr.io/heyvito/semver-releaser:latest
   args:
-    - ${{ inputs.github-token }}
+    - "--token=${{ inputs.github-token }}"
+    - "--push=${{ inputs.push }}"
+    - "--rules=${{ inputs.rules }}"
+    - "--categories=${{ inputs.categories }}"
+    - "--ignore=${{ inputs.ignore }}"

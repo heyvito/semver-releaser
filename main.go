@@ -3,24 +3,25 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
-
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/google/go-github/v39/github"
+	"github.com/heyvito/semver-releaser/eql"
+	"github.com/urfave/cli/v2"
 	"golang.org/x/mod/semver"
 	"golang.org/x/oauth2"
+	"io"
+	"os"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 )
 
-// 1. Determine latest version (enum tags?)
+// 1. Determine the latest version (enum tags?)
 // 2. Fetch commits since latest tag
 // 3. Calculate version based on commits
 // 4. Create tag
@@ -54,18 +55,69 @@ func warn(f string, args ...interface{}) {
 	fmt.Printf("! %s\n", fmt.Sprintf(f, args...))
 }
 
-func main() {
+type Context struct {
+	Token      string
+	Push       bool
+	Rules      map[string]string
+	Categories map[string]string
+	Ignore     []string
+}
+
+func run(c *Context) {
 	repoPath := os.Getenv("GITHUB_WORKSPACE")
 	repoFullName := os.Getenv("GITHUB_REPOSITORY")
 	repoComponents := strings.Split(repoFullName, "/")
 	repoOwner, repoName := repoComponents[0], repoComponents[1]
-	token := os.Args[1]
-	noPush := false
-	if len(os.Args) > 2 {
-		noPush = os.Args[2] == "true"
+
+	for _, r := range c.Rules {
+		r = strings.ToLower(r)
+		if r != "patch" && r != "minor" && r != "major" {
+			fmt.Printf("Error: Invalid semver component '%s'", r)
+			os.Exit(1)
+		}
 	}
 
-	info("Working on %s", repoPath)
+	runInfo := []string{
+		"semver-releaser v2",
+		"https://github.com/heyvito/semver-releaser",
+		"",
+		"Run information",
+		"---------------",
+		fmt.Sprintf("Working on %s", repoPath),
+		fmt.Sprintf("Will push changes? %t", c.Push),
+		fmt.Sprintf("Rules"),
+		fmt.Sprintf("-----"),
+	}
+
+	for k, v := range c.Rules {
+		runInfo = append(runInfo, fmt.Sprintf("    '%s' commits bumps %s", strings.ToLower(k), v))
+	}
+
+	runInfo = append(runInfo, "",
+		"When writing release notes...")
+
+	for k, v := range c.Categories {
+		if k == "*" {
+			continue
+		}
+		runInfo = append(runInfo, fmt.Sprintf("    ...group all '%s' commits under '%s';", strings.ToLower(k), v))
+	}
+
+	if title, ok := c.Categories["*"]; ok {
+		runInfo = append(runInfo, fmt.Sprintf("    ...and all other commits under '%s';", title))
+	}
+
+	if len(c.Ignore) > 0 {
+		runInfo = append(runInfo, "",
+			"Ignore commits with the following prefixes:")
+		for _, v := range c.Ignore {
+			runInfo = append(runInfo, " - "+v)
+		}
+	}
+
+	fmt.Println(strings.Join(runInfo, "\n"))
+	fmt.Println()
+
 	repo, err := git.PlainOpen(repoPath)
 	if err != nil {
 		abort("Could not open %s: %s", repoPath, err)
@@ -129,12 +181,15 @@ func main() {
 		latestVersion = "v0.0.0"
 	}
 
-	info("Using commits since %s", head)
-	commits, err := repo.Log(&git.LogOptions{})
+	info("Last release is at %s", head)
+	commits, err := repo.Log(&git.LogOptions{
+		All: true,
+	})
 	if err != nil {
 		abort("Error reading commits: %s", err)
 	}
 
+	excluded := 0
 	var conventionals Commits
 	for {
 		commit, err := commits.Next()
@@ -145,7 +200,15 @@ func main() {
 			break
 		}
 		if conv := ParseCommit(strings.TrimSpace(commit.Message)); conv != nil {
+			for _, v := range c.Ignore {
+				if strings.ToLower(v) == conv.Type {
+					excluded++
+					continue
+				}
+			}
 			conventionals = append(conventionals, conv)
+		} else {
+			warn("Ignoring non-standard commit: %s", strings.Split(commit.Message, "\n")[0])
 		}
 	}
 	commits.Close()
@@ -155,8 +218,14 @@ func main() {
 		return
 	}
 
+	info("Processing %d commit(s) since %s", len(conventionals), head)
+	if excluded > 0 {
+		info("%d commit(s) matched the 'ignore' flag and were excluded", excluded)
+	}
+
 	major, minor, patch := parseSemVer(latestVersion)
-	switch conventionals.ChangeKind() {
+	bumpKind := determineBump(c, conventionals)
+	switch bumpKind {
 	case SemVerPatch:
 		patch++
 	case SemVerMinor:
@@ -166,20 +235,17 @@ func main() {
 		patch = 0
 		minor = 0
 		major++
-	}
-
-	nextVersion := fmt.Sprintf("v%d.%d.%d", major, minor, patch)
-	breaks, feats, fixes := conventionals.Stats()
-	info("Releasing %s with %d break(s), %d feature(s), %d fix(es)", nextVersion, breaks, feats, fixes)
-
-	if breaks == 0 && feats == 0 && fixes == 0 {
+	case SemVerNone:
 		info("No need to bump version.")
 		return
 	}
 
+	nextVersion := fmt.Sprintf("v%d.%d.%d", major, minor, patch)
+	info("Releasing %s", nextVersion)
+
 	fmt.Printf("::set-output name=version::%s\n", nextVersion)
 
-	if noPush {
+	if !c.Push {
 		return
 	}
 
@@ -212,7 +278,7 @@ func main() {
 		},
 		Auth: &http.BasicAuth{
 			Username: "x-access-token",
-			Password: token,
+			Password: c.Token,
 		},
 	})
 
@@ -221,10 +287,10 @@ func main() {
 	}
 
 	info("Pushed tag")
-	releaseText := makeRelease(conventionals)
+	releaseText := makeReleaseText(c, conventionals)
 
 	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: c.Token})
 	tc := oauth2.NewClient(ctx, ts)
 
 	client := github.NewClient(tc)
@@ -242,6 +308,74 @@ func main() {
 
 }
 
+var semverString = map[string]SemVerComponent{
+	"patch": SemVerPatch,
+	"minor": SemVerMinor,
+	"major": SemVerMajor,
+}
+
+func semverFromString(n string) SemVerComponent {
+	n = strings.TrimSpace(strings.ToLower(n))
+	if v, ok := semverString[n]; ok {
+		return v
+	}
+
+	return SemVerNone
+}
+
+func determineBump(c *Context, commits Commits) SemVerComponent {
+	bang := SemVerNone
+	_, hasBang := c.Rules["bang"]
+	components := map[SemVerComponent][]string{}
+	toBump := SemVerNone
+
+	for ruleName, kind := range c.Rules {
+		if ruleName == "bang" {
+			bang = semverFromString(kind)
+			continue
+		}
+
+		k := semverFromString(kind)
+		components[k] = append(components[k], ruleName)
+	}
+
+	comps := []SemVerComponent{SemVerMajor, SemVerMinor, SemVerPatch}
+
+	for _, r := range commits {
+		if toBump == SemVerMajor {
+			break
+		}
+
+		if r.Bang && hasBang {
+			if bang > toBump {
+				toBump = bang
+				continue
+			}
+		}
+
+		prefix := strings.ToLower(r.Type)
+	compLoop:
+		for _, v := range comps {
+			prefixes, ok := components[v]
+			if !ok {
+				continue
+			}
+			if toBump > v {
+				continue
+			}
+
+			for _, pr := range prefixes {
+				if strings.ToLower(pr) == prefix {
+					toBump = v
+					break compLoop
+				}
+			}
+		}
+	}
+
+	return toBump
+}
+
 func formatCommit(c *ConventionalCommit) string {
 	if c.Scope != "" {
 		return fmt.Sprintf("- **%s**: %s", c.Scope, c.Description)
@@ -250,41 +384,51 @@ func formatCommit(c *ConventionalCommit) string {
 	}
 }
 
-func makeRelease(conventionals Commits) string {
-	var feats []string
-	var fixes []string
+func makeReleaseText(c *Context, commits Commits) string {
+	categories := map[string][]string{}
+	usesOther := false
 	var others []string
+	for cat := range c.Categories {
+		if cat == "*" {
+			usesOther = true
+			break
+		}
+	}
 
-	for _, c := range conventionals {
-		switch c.Change {
-		case ConventionalFeature:
-			feats = append(feats, formatCommit(c))
-		case ConventionalFix:
-			fixes = append(fixes, formatCommit(c))
-		default:
-			if c.Scope != "" {
-				others = append(others, fmt.Sprintf("- %s(%s): %s", c.Type, c.Scope, c.Description))
+	for _, r := range commits {
+		commitType := strings.ToLower(r.Type)
+		match := false
+		for cat := range c.Categories {
+			if cat == "*" {
+				continue
+			}
+			if commitType == strings.ToLower(cat) {
+				var arr []string
+				if v, ok := categories[cat]; ok {
+					arr = v
+				}
+				categories[cat] = append(arr, formatCommit(r))
+				match = true
+				break
+			}
+		}
+
+		if !match && usesOther {
+			if r.Scope != "" {
+				others = append(others, fmt.Sprintf("- %s(%s): %s", r.Type, r.Scope, r.Description))
 			} else {
-				others = append(others, fmt.Sprintf("- %s: %s", c.Type, c.Description))
+				others = append(others, fmt.Sprintf("- %s: %s", r.Type, r.Description))
 			}
 		}
 	}
 
 	var output []string
 
-	if len(feats) > 0 {
-		output = append(output, "# ✨ New Features")
-		output = append(output, feats...)
-	}
-
-	if len(fixes) > 0 {
-		output = append(output, "# 🐞 Bug Fixes")
-		output = append(output, fixes...)
-	}
-
-	if len(others) > 0 {
-		output = append(output, "# 🔨 Other Changes")
-		output = append(output, others...)
+	for id, title := range c.Categories {
+		if items, ok := categories[strings.ToLower(id)]; ok {
+			output = append(output, fmt.Sprintf("# %s", title))
+			output = append(output, items...)
+		}
 	}
 
 	return strings.Join(output, "\n")
@@ -298,14 +442,6 @@ func parseSemVer(v string) (major, minor, patch int) {
 	return
 }
 
-type ConventionalChange int
-
-const (
-	ConventionalOther ConventionalChange = iota
-	ConventionalFix
-	ConventionalFeature
-)
-
 type SemVerComponent int
 
 const (
@@ -317,46 +453,14 @@ const (
 
 type ConventionalCommit struct {
 	Type         string
-	Change       ConventionalChange
 	SemVerChange SemVerComponent
 	Scope        string
 	Description  string
 	Body         string
+	Bang         bool
 }
 
 type Commits []*ConventionalCommit
-
-func (c Commits) ChangeKind() SemVerComponent {
-	m := map[SemVerComponent]bool{}
-	for _, c := range c {
-		m[c.SemVerChange] = true
-	}
-
-	if _, ok := m[SemVerMajor]; ok {
-		return SemVerMajor
-	}
-	if _, ok := m[SemVerMinor]; ok {
-		return SemVerMinor
-	}
-	if _, ok := m[SemVerPatch]; ok {
-		return SemVerPatch
-	}
-	return SemVerNone
-}
-
-func (c Commits) Stats() (breaks, feats, fixes int) {
-	for _, c := range c {
-		switch c.SemVerChange {
-		case SemVerPatch:
-			fixes++
-		case SemVerMinor:
-			feats++
-		case SemVerMajor:
-			breaks++
-		}
-	}
-	return
-}
 
 var conventionalRegexp = regexp.MustCompile(`^([^(:!]+)(?:\(([^)]+)\))?(!)?: ([^\n]+)$`)
 var multiLineCommit = regexp.MustCompile(`(.+)\n{2,}(.+\n*)+`)
@@ -370,13 +474,14 @@ func ParseCommit(msg string) *ConventionalCommit {
 		}
 		for _, l := range lines[1:] {
 			if strings.HasPrefix(strings.ToLower(l), "breaking change:") {
-				res.SemVerChange = SemVerMajor
+				res.Bang = true
 			}
 		}
 		res.Body = strings.Join(lines[1:], "\n")
 
 		return res
 	}
+
 	if !conventionalRegexp.MatchString(msg) {
 		return nil
 	}
@@ -387,19 +492,55 @@ func ParseCommit(msg string) *ConventionalCommit {
 		Type:        kind,
 		Scope:       scope,
 		Description: change,
+		Bang:        bang == "!",
 		Body:        "",
-	}
-	switch strings.ToLower(kind) {
-	case "fix":
-		res.SemVerChange = SemVerPatch
-		res.Change = ConventionalFix
-	case "feat":
-		res.SemVerChange = SemVerMinor
-		res.Change = ConventionalFeature
-	}
-	if bang == "!" {
-		res.SemVerChange = SemVerMajor
 	}
 
 	return res
+}
+
+func main() {
+	app := cli.App{
+		Name: "semver-releaser",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "token", Required: true},
+			&cli.StringFlag{Name: "push", Required: false, Value: "true"},
+			&cli.StringFlag{Name: "rules", Required: true},
+			&cli.StringFlag{Name: "categories", Required: true},
+			&cli.StringFlag{Name: "ignore", Required: false},
+		},
+		Action: func(c *cli.Context) error {
+			rules, err := eql.Parse(c.String("rules"))
+			if err != nil {
+				fmt.Printf("Error parsing rules: %s\n", err)
+				os.Exit(1)
+			}
+			cats, err := eql.Parse(c.String("categories"))
+			if err != nil {
+				fmt.Printf("Error parsing categories: %s\n", err)
+				os.Exit(1)
+			}
+
+			rawIgnore := strings.TrimSpace(c.String("ignore"))
+			var ignore []string
+			if len(rawIgnore) > 0 {
+				ignore = strings.Split(rawIgnore, " ")
+			}
+
+			ctx := Context{
+				Token:      c.String("token"),
+				Push:       c.String("push") == "true",
+				Rules:      rules,
+				Categories: cats,
+				Ignore:     ignore,
+			}
+
+			run(&ctx)
+			return nil
+		},
+	}
+
+	if err := app.Run(os.Args); err != nil {
+		panic(err)
+	}
 }
